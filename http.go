@@ -90,10 +90,10 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the command from the form data
-	command := r.FormValue(FormDataKeyCommand)
+	// Get the command from the form data AFTER parsing
+	command := r.FormValue("command")
 	if command == "" {
-		http.Error(w, "Missing command", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("Missing command (available fields: %v)", r.MultipartForm.Value), http.StatusBadRequest)
 		return
 	}
 
@@ -142,9 +142,7 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 				// Replace placeholders in command with actual file paths
 				// Supports: <fieldname>, <fieldname_0>, <fieldname_1>, etc.
 				placeholder := fmt.Sprintf("<%s>", fieldName)
-				if contains(command, placeholder) {
-					command = replaceAll(command, placeholder, tempFilePath)
-				}
+				command = replaceAll(command, placeholder, tempFilePath)
 
 				fileCount++
 			}
@@ -166,9 +164,7 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 			io.Copy(tempFile, file)
 
 			placeholder := fmt.Sprintf("<%s>", FormDataKeyFile)
-			if contains(command, placeholder) {
-				command = replaceAll(command, placeholder, tempFilePath)
-			}
+			command = replaceAll(command, placeholder, tempFilePath)
 		}
 	}
 
