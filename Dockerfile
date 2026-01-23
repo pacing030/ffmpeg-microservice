@@ -33,8 +33,12 @@ COPY --from=builder /app/ffmpeg-microservice .
 # Create temp directory for FFmpeg file processing
 RUN mkdir -p /tmp && chmod 1777 /tmp
 
-# Expose port (Railway will override with PORT env variable)
+# Expose port (Railway provides PORT env variable)
 EXPOSE 8080
 
-# Run the microservice with correct flag names
-CMD ["sh", "-c", "./ffmpeg-microservice -hport=:${PORT:-8080} -ao=*"]
+# Create an entrypoint script to handle PORT variable
+RUN echo '#!/bin/sh' > /app/entrypoint.sh && \
+    echo 'exec ./ffmpeg-microservice -hport=:${PORT:-8080} -ao=*' >> /app/entrypoint.sh && \
+    chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]
