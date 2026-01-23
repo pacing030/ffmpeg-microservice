@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,28 +31,46 @@ func (hs *HTTPServer) Run() error {
 }
 
 func handlePost(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get(URLQueryParamFormData) == "1" {
+	log.Printf("=== handlePost called ===")
+	log.Printf("URL: %s", r.URL.String())
+	log.Printf("Query params: %s", r.URL.Query().Encode())
+	log.Printf("Method: %s", r.Method)
+	log.Printf("Content-Type: %s", r.Header.Get("Content-Type"))
+	
+	formDataParam := r.URL.Query().Get(URLQueryParamFormData)
+	log.Printf("URLQueryParamFormData value: '%s'", formDataParam)
+	
+	if formDataParam == "1" {
+		log.Println("→ Routing to handleFormDataMultiFile")
 		handleFormDataMultiFile(w, r)
 	} else {
+		log.Println("→ Routing to handleHTTP")
 		handleHTTP(w, r)
 	}
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Println("=== handleHTTP called ===")
+	
 	// Read the command from the request header
 	command := r.Header.Get(HTTPHeaderCommand)
+	log.Printf("Command from header: '%s'", command)
+	
 	if command == "" {
+		log.Println("ERROR: Missing command header")
 		http.Error(w, "Missing command", http.StatusBadRequest)
 		return
 	}
+	
 	// Check if client is requesting the output to be streamed back as the response.
-	// If so, the stdout of the cmd is set to w
 	var stdout io.Writer = os.Stderr
 	if r.Header.Get(HTTPHeaderAccept) == ContentTypeApplicationOctetStream {
 		stdout = w
 	}
+	
 	cmd := PrepareCmd(command, r.Body, stdout, os.Stderr)
 	if err := cmd.Run(); err != nil {
+		log.Printf("ERROR: Command failed: %v", err)
 		http.Error(w, fmt.Sprintf("command failed: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -84,15 +103,31 @@ func handleFormData(w http.ResponseWriter, r *http.Request) {
 
 // handleFormDataMultiFile: NEW - supports multiple files
 func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
+	// Catch panics to prevent server crash
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("❌ PANIC in handleFormDataMultiFile: %v", err)
+			http.Error(w, fmt.Sprintf("Internal server error: %v", err), http.StatusInternalServerError)
+		}
+	}()
+	
+	log.Println("=== handleFormDataMultiFile called ===")
+	
 	// Parse the multipart form with 100MB max memory
+	log.Println("Parsing multipart form...")
 	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		log.Printf("ERROR: Failed to parse multipart form: %v", err)
 		http.Error(w, "Failed to parse multipart form", http.StatusBadRequest)
 		return
 	}
+	log.Println("✓ Multipart form parsed successfully")
 
 	// Get the command from the form data AFTER parsing
 	command := r.FormValue("command")
+	log.Printf("Command from form: '%s'", command)
+	
 	if command == "" {
+		log.Printf("ERROR: Missing command. Available fields: %v", r.MultipartForm.Value)
 		http.Error(w, fmt.Sprintf("Missing command (available fields: %v)", r.MultipartForm.Value), http.StatusBadRequest)
 		return
 	}
@@ -100,18 +135,25 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 	// Create a temporary directory for all files
 	tmpDir, err := os.MkdirTemp("", "ffmpeg-*")
 	if err != nil {
+		log.Printf("ERROR: Failed to create temp directory: %v", err)
 		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
 		return
 	}
-	defer os.RemoveAll(tmpDir) // Clean up after FFmpeg completes
+	defer os.RemoveAll(tmpDir)
+	log.Printf("✓ Created temp directory: %s", tmpDir)
 
 	// Handle multiple files from the multipart form
 	fileCount := 0
 	if r.MultipartForm != nil && r.MultipartForm.File != nil {
+		log.Printf("Processing %d file fields...", len(r.MultipartForm.File))
+		
 		for fieldName, fileHeaders := range r.MultipartForm.File {
+			log.Printf("  Field '%s': %d file(s)", fieldName, len(fileHeaders))
+			
 			for i, fileHeader := range fileHeaders {
 				file, err := fileHeader.Open()
 				if err != nil {
+					log.Printf("ERROR: Failed to open uploaded file: %v", err)
 					http.Error(w, "Failed to open uploaded file", http.StatusBadRequest)
 					return
 				}
@@ -128,21 +170,24 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 				// Write uploaded file to temp location
 				tempFile, err := os.Create(tempFilePath)
 				if err != nil {
+					log.Printf("ERROR: Failed to create temp file: %v", err)
 					http.Error(w, "Failed to create temp file", http.StatusInternalServerError)
 					return
 				}
 
 				if _, err := io.Copy(tempFile, file); err != nil {
 					tempFile.Close()
+					log.Printf("ERROR: Failed to save uploaded file: %v", err)
 					http.Error(w, "Failed to save uploaded file", http.StatusInternalServerError)
 					return
 				}
 				tempFile.Close()
+				log.Printf("    ✓ Saved to: %s", tempFilePath)
 
 				// Replace placeholders in command with actual file paths
-				// Supports: <fieldname>, <fieldname_0>, <fieldname_1>, etc.
 				placeholder := fmt.Sprintf("<%s>", fieldName)
 				command = replaceAll(command, placeholder, tempFilePath)
+				log.Printf("    ✓ Replaced placeholder %s", placeholder)
 
 				fileCount++
 			}
@@ -151,12 +196,14 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback for legacy single "file" field if no files were found
 	if fileCount == 0 {
+		log.Println("No files found in multipart form, trying legacy 'file' field...")
 		file, _, err := r.FormFile(FormDataKeyFile)
 		if err == nil {
 			defer file.Close()
 			tempFilePath := filepath.Join(tmpDir, "input")
 			tempFile, err := os.Create(tempFilePath)
 			if err != nil {
+				log.Printf("ERROR: Failed to create temp file: %v", err)
 				http.Error(w, "Failed to create temp file", http.StatusInternalServerError)
 				return
 			}
@@ -165,8 +212,14 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 
 			placeholder := fmt.Sprintf("<%s>", FormDataKeyFile)
 			command = replaceAll(command, placeholder, tempFilePath)
+			log.Printf("✓ Legacy file saved and placeholder replaced")
+		} else {
+			log.Printf("WARNING: No files uploaded at all: %v", err)
 		}
 	}
+
+	log.Printf("Total files processed: %d", fileCount)
+	log.Printf("Final command: %s", command)
 
 	// Check if client is requesting the output to be streamed back as the response
 	var stdout io.Writer = os.Stderr
@@ -175,10 +228,14 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prepare and run the FFmpeg command
+	log.Println("Executing FFmpeg command...")
 	cmd := PrepareCmd(command, nil, stdout, os.Stderr)
 	if err := cmd.Run(); err != nil {
+		log.Printf("❌ ERROR: Command failed: %v", err)
 		http.Error(w, fmt.Sprintf("command failed: %v", err), http.StatusInternalServerError)
+		return
 	}
+	log.Println("✓ FFmpeg command completed successfully")
 }
 
 // contains checks if string contains substring
