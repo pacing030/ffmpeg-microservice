@@ -36,6 +36,5 @@ RUN mkdir -p /tmp && chmod 1777 /tmp
 # Expose port (Railway will override with PORT env variable)
 EXPOSE 8080
 
-# Run the microservice
-# Railway provides PORT env variable, use it or default to 8080
-CMD ["sh", "-c", "./ffmpeg-microservice -listen-addr=:${PORT:-8080} -allowed-origins=*"]
+# Run the microservice with correct flag names
+CMD ["sh", "-c", "./ffmpeg-microservice -hport=:${PORT:-8080} -ao=*"]
