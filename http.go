@@ -142,6 +142,12 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 	defer os.RemoveAll(tmpDir)
 	log.Printf("✓ Created temp directory: %s", tmpDir)
 
+	// Define output path
+	outputPath := filepath.Join(tmpDir, "output.mp4")
+	
+	// Replace <output> placeholder with actual output path
+	command = replaceAll(command, "<output>", outputPath)
+
 	// Handle multiple files from the multipart form
 	fileCount := 0
 	if r.MultipartForm != nil && r.MultipartForm.File != nil {
@@ -220,22 +226,44 @@ func handleFormDataMultiFile(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Total files processed: %d", fileCount)
 	log.Printf("Final command: %s", command)
-
-	// Check if client is requesting the output to be streamed back as the response
-	var stdout io.Writer = os.Stderr
-	if r.Header.Get(HTTPHeaderAccept) == ContentTypeApplicationOctetStream {
-		stdout = w
-	}
+	log.Printf("Expected output file: %s", outputPath)
 
 	// Prepare and run the FFmpeg command
 	log.Println("Executing FFmpeg command...")
-	cmd := PrepareCmd(command, nil, stdout, os.Stderr)
+	cmd := PrepareCmd(command, nil, os.Stderr, os.Stderr)
 	if err := cmd.Run(); err != nil {
 		log.Printf("❌ ERROR: Command failed: %v", err)
 		http.Error(w, fmt.Sprintf("command failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 	log.Println("✓ FFmpeg command completed successfully")
+
+	// Check if output file was created
+	if _, err := os.Stat(outputPath); err != nil {
+		log.Printf("ERROR: Output file not found at %s: %v", outputPath, err)
+		http.Error(w, "Output file was not created", http.StatusInternalServerError)
+		return
+	}
+
+	// Read the output file
+	log.Printf("Reading output file: %s", outputPath)
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		log.Printf("ERROR: Failed to read output file: %v", err)
+		http.Error(w, "Failed to read output file", http.StatusInternalServerError)
+		return
+	}
+
+	// Send the file back to the client
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Content-Disposition", "attachment; filename=output.mp4")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(outputData); err != nil {
+		log.Printf("ERROR: Failed to write response: %v", err)
+		return
+	}
+	
+	log.Printf("✓ Successfully sent output file (%d bytes)", len(outputData))
 }
 
 // contains checks if string contains substring
