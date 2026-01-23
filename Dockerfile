@@ -23,6 +23,7 @@ FROM alpine:3.19
 RUN apk add --no-cache \
     ffmpeg \
     ca-certificates \
+    bash \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app
@@ -36,9 +37,12 @@ RUN mkdir -p /tmp && chmod 1777 /tmp
 # Expose port (Railway provides PORT env variable)
 EXPOSE 8080
 
-# Create an entrypoint script to handle PORT variable
-RUN echo '#!/bin/sh' > /app/entrypoint.sh && \
-    echo 'exec ./ffmpeg-microservice -hport=:${PORT:-8080} -ao=*' >> /app/entrypoint.sh && \
+# Create an entrypoint script with debugging
+RUN echo '#!/bin/bash' > /app/entrypoint.sh && \
+    echo 'echo "DEBUG: PORT env variable is: ${PORT}"' >> /app/entrypoint.sh && \
+    echo 'LISTEN_PORT="${PORT:-8080}"' >> /app/entrypoint.sh && \
+    echo 'echo "DEBUG: Starting server on port :${LISTEN_PORT}"' >> /app/entrypoint.sh && \
+    echo 'exec ./ffmpeg-microservice -hport=":${LISTEN_PORT}" -ao="*"' >> /app/entrypoint.sh && \
     chmod +x /app/entrypoint.sh
 
 CMD ["/app/entrypoint.sh"]
