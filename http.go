@@ -32,6 +32,11 @@ func (hs *HTTPServer) Run() error {
 	router := mux.NewRouter()
 	router.HandleFunc("/", handlePost).Methods("POST", "OPTIONS")
 	router.HandleFunc("/concat-json", handleConcatJSON).Methods("POST", "OPTIONS")
+	
+	// NEW ENDPOINTS
+	router.HandleFunc("/merge-video-audio", handleMergeVideoAudio).Methods("POST", "OPTIONS")
+	router.HandleFunc("/concat-videos", handleConcatVideos).Methods("POST", "OPTIONS")
+	
 	return http.ListenAndServe(hs.ListenAddr, withCORS(router, hs.AllowedOrigins))
 }
 
@@ -44,6 +49,198 @@ type ConcatRequest struct {
 type AudioChunk struct {
 	Name string `json:"name"`
 	Data string `json:"data"`
+}
+
+// NEW: Merge video + audio into single MP4
+func handleMergeVideoAudio(w http.ResponseWriter, r *http.Request) {
+	log.Println("=== handleMergeVideoAudio called ===")
+
+	// Parse multipart form
+	if err := r.ParseMultipartForm(200 << 20); err != nil {
+		log.Printf("ERROR: Failed to parse form: %v", err)
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "ffmpeg-merge-")
+	if err != nil {
+		log.Printf("ERROR: Failed to create temp dir: %v", err)
+		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+	log.Printf("✓ Created temp directory: %s", tmpDir)
+
+	// Get video file
+	videoFile, _, err := r.FormFile("video")
+	if err != nil {
+		log.Printf("ERROR: Missing video file: %v", err)
+		http.Error(w, "Missing video file", http.StatusBadRequest)
+		return
+	}
+	defer videoFile.Close()
+
+	videoPath := filepath.Join(tmpDir, "input_video.mp4")
+	if err := saveUploadedFile(videoFile, videoPath); err != nil {
+		log.Printf("ERROR: Failed to save video: %v", err)
+		http.Error(w, "Failed to save video", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("✓ Saved video: %s", videoPath)
+
+	// Get audio file
+	audioFile, _, err := r.FormFile("audio")
+	if err != nil {
+		log.Printf("ERROR: Missing audio file: %v", err)
+		http.Error(w, "Missing audio file", http.StatusBadRequest)
+		return
+	}
+	defer audioFile.Close()
+
+	audioPath := filepath.Join(tmpDir, "input_audio.mp3")
+	if err := saveUploadedFile(audioFile, audioPath); err != nil {
+		log.Printf("ERROR: Failed to save audio: %v", err)
+		http.Error(w, "Failed to save audio", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("✓ Saved audio: %s", audioPath)
+
+	// Merge with FFmpeg
+	outputPath := filepath.Join(tmpDir, "merged.mp4")
+	command := fmt.Sprintf("ffmpeg -i %s -i %s -c:v copy -c:a aac -shortest %s",
+		videoPath, audioPath, outputPath)
+	
+	log.Printf("Executing: %s", command)
+	cmd := PrepareCmd(command, nil, os.Stderr, os.Stderr)
+	if err := cmd.Run(); err != nil {
+		log.Printf("ERROR: FFmpeg failed: %v", err)
+		http.Error(w, fmt.Sprintf("FFmpeg failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	log.Println("✓ FFmpeg merge successful")
+
+	// Send output
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		log.Printf("ERROR: Failed to read output: %v", err)
+		http.Error(w, "Failed to read output", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"merged.mp4\"")
+	w.WriteHeader(http.StatusOK)
+	w.Write(outputData)
+	log.Printf("✓ Sent merged video (%d bytes)", len(outputData))
+}
+
+// NEW: Concatenate multiple videos from JSON base64
+func handleConcatVideos(w http.ResponseWriter, r *http.Request) {
+	log.Println("=== handleConcatVideos called ===")
+
+	// Parse JSON body
+	var req ConcatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("ERROR: Invalid JSON: %v", err)
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Chunks) < 2 {
+		log.Printf("ERROR: Minimum 2 videos required, got %d", len(req.Chunks))
+		http.Error(w, "Minimum 2 videos required", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("✓ Received %d video chunks", len(req.Chunks))
+
+	// Create temp directory
+	tmpDir, err := os.MkdirTemp("", "ffmpeg-concat-videos-")
+	if err != nil {
+		log.Printf("ERROR: Failed to create temp dir: %v", err)
+		http.Error(w, "Failed to create temp directory", http.StatusInternalServerError)
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+	log.Printf("✓ Created temp directory: %s", tmpDir)
+
+	// Sort chunks by name
+	sort.Slice(req.Chunks, func(i, j int) bool {
+		return req.Chunks[i].Name < req.Chunks[j].Name
+	})
+
+	// Decode and write video files
+	for i, chunk := range req.Chunks {
+		decodedData, err := base64.StdEncoding.DecodeString(chunk.Data)
+		if err != nil {
+			log.Printf("ERROR: Invalid base64 in chunk %d: %v", i, err)
+			http.Error(w, fmt.Sprintf("Invalid base64 in chunk '%s'", chunk.Name), http.StatusBadRequest)
+			return
+		}
+
+		filePath := filepath.Join(tmpDir, chunk.Name+".mp4")
+		if err := os.WriteFile(filePath, decodedData, 0644); err != nil {
+			log.Printf("ERROR: Failed to write file: %v", err)
+			http.Error(w, "Failed to write file", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("  ✓ Wrote video %d: %s (%d bytes)", i+1, chunk.Name, len(decodedData))
+	}
+
+	// Create concat list
+	concatListPath := filepath.Join(tmpDir, "concat_list.txt")
+	var lines []string
+	for _, chunk := range req.Chunks {
+		filePath := filepath.Join(tmpDir, chunk.Name+".mp4")
+		lines = append(lines, fmt.Sprintf("file '%s'", filePath))
+	}
+
+	if err := os.WriteFile(concatListPath, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		log.Printf("ERROR: Failed to create concat list: %v", err)
+		http.Error(w, "Failed to create concat list", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("✓ Created concat list")
+
+	// Execute FFmpeg with re-encoding for compatibility
+	outputPath := filepath.Join(tmpDir, "output.mp4")
+	command := fmt.Sprintf("ffmpeg -f concat -safe 0 -i %s -c:v libx264 -preset ultrafast -c:a aac %s",
+		concatListPath, outputPath)
+	
+	log.Printf("Executing: %s", command)
+	cmd := PrepareCmd(command, nil, os.Stderr, os.Stderr)
+	if err := cmd.Run(); err != nil {
+		log.Printf("ERROR: FFmpeg failed: %v", err)
+		http.Error(w, fmt.Sprintf("FFmpeg failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	log.Println("✓ FFmpeg concat successful")
+
+	// Send output
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		log.Printf("ERROR: Failed to read output: %v", err)
+		http.Error(w, "Failed to read output", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Content-Disposition", "attachment; filename=\"concatenated.mp4\"")
+	w.WriteHeader(http.StatusOK)
+	w.Write(outputData)
+	log.Printf("✓ Sent concatenated video (%d bytes)", len(outputData))
+}
+
+// Helper function to save uploaded file
+func saveUploadedFile(file io.Reader, destPath string) error {
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+	_, err = io.Copy(destFile, file)
+	return err
 }
 
 // NEW: Handle JSON-based audio concatenation
